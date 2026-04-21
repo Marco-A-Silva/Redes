@@ -19,9 +19,9 @@ const (
 
 // Destinos
 const (
-	DestMsg   = 0x01
-	DestVid   = 0x02
-	DestForum = 0x03
+	DestMsg   byte = 0x01
+	DestVid   byte = 0x02
+	DestForum byte = 0x03
 )
 
 var DestMap = map[byte]string{

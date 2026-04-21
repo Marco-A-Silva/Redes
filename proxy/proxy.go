@@ -11,6 +11,22 @@ import (
 	"proyecto"
 )
 
+func errorHandler(args ...any) {
+	for _, args := range args {
+		switch v:= args.(type) {
+		case error:
+			if v != nil {
+				log.Printf("Error: %v", v)
+			}
+		case bool:
+			if !v {
+				log.Print("NOT OK")
+			}
+		default:
+		}
+	}
+}
+
 func plog(prefix string, msg string, stealth bool) {
 	if !stealth {
 		// Usamos log.Printf para formatear el prefijo y el mensaje

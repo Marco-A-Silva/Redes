@@ -5,20 +5,35 @@ import (
 	"net"
 	"strings"
 
-	"proyecto" // Asegurate que el go.mod en la raíz diga 'module proyecto'
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // ---------------------------------------------------------------------------
-// Estilos Globales
+// Mensajes internos de bubbletea
 // ---------------------------------------------------------------------------
+
+type (
+	msgReceived     struct{ text string }
+	msgDisconnected struct{}
+)
+
+// ---------------------------------------------------------------------------
+// Estilos Refinados
+// ---------------------------------------------------------------------------
+
 var (
+	// Estilo para el contenedor del diálogo de login
+	styleLoginBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("63")).
+			Padding(1, 3).
+			Align(lipgloss.Center)
+
 	styleHeader = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("63")).
-			Padding(0, 1)
+			MarginBottom(1)
 
 	styleMsgArea = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -47,23 +62,20 @@ var (
 				Bold(true)
 )
 
-type (
-	msgReceived     struct{ text string }
-	msgDisconnected struct{}
-)
+// ---------------------------------------------------------------------------
+// Estado y Modelo
+// ---------------------------------------------------------------------------
 
 type screen int
 
 const (
-	screenMenu screen = iota
-	screenLogin
+	screenLogin screen = iota
 	screenChat
 )
 
 type model struct {
 	screen       screen
 	conn         net.Conn
-	destSelected byte
 	name         string
 	input        string
 	messages     []string
@@ -72,15 +84,20 @@ type model struct {
 	disconnected bool
 }
 
-func initialModel() model {
+func initialModel(conn net.Conn) model {
 	return model{
-		screen: screenMenu,
+		screen: screenLogin,
+		conn:   conn,
 	}
 }
 
 func (m model) Init() tea.Cmd {
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -90,68 +107,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgReceived:
 		m.messages = append(m.messages, msg.text)
-		return m, startReader(m.conn)
 
 	case msgDisconnected:
 		m.disconnected = true
-		m.messages = append(m.messages, styleDisconnected.Render("— conexión cerrada —"))
+		m.messages = append(m.messages, styleSystem.Render("— conexión cerrada por el servidor —"))
 
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
-
 		case tea.KeyEnter:
 			if m.screen == screenLogin {
-				return m.handleLoginTransition()
+				return m.handleLoginEnter()
 			}
-			if m.screen == screenChat {
-				return m.handleChatEnter()
-			}
-
-		case tea.KeyRunes:
-			if m.screen == screenMenu {
-				switch msg.String() {
-				case "1":
-					m.destSelected = proyecto.DestMsg
-				case "2":
-					m.destSelected = proyecto.DestVid
-				case "3":
-					m.destSelected = proyecto.DestForum
-				}
-				m.screen = screenLogin
-				return m, nil
-			}
-			m.input += msg.String()
-
+			return m.handleChatEnter()
 		case tea.KeyBackspace:
 			if len(m.input) > 0 {
 				m.input = m.input[:len(m.input)-1]
 			}
-		}
+		case tea.KeySpace:
+		case tea.KeyRunes:
+			m.input += msg.String()
+			
+		}	
 	}
 	return m, nil
 }
 
-func (m model) handleLoginTransition() (tea.Model, tea.Cmd) {
+func (m model) handleLoginEnter() (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(m.input)
 	if name == "" {
 		return m, nil
 	}
 	m.name = name
 	m.input = ""
-
-	c, err := connectToProxy(m.destSelected)
-	if err != nil {
-		m.messages = append(m.messages, styleDisconnected.Render("Error: "+err.Error()))
-		return m, nil
-	}
-
-	m.conn = c
 	m.screen = screenChat
-	fmt.Fprintf(m.conn, "%s se unió al chat\n", name)
-
-	return m, startReader(m.conn)
+	m.messages = append(m.messages, styleSystem.Render(fmt.Sprintf("— conectado como %s —", name)))
+	if m.conn != nil {
+		fmt.Fprintf(m.conn, "%s se unió al chat\n", name)
+	}
+	return m, nil
 }
 
 func (m model) handleChatEnter() (tea.Model, tea.Cmd) {
@@ -159,69 +154,85 @@ func (m model) handleChatEnter() (tea.Model, tea.Cmd) {
 	if text == "" || m.disconnected {
 		return m, nil
 	}
-	// Enviar al proxy
-	fmt.Fprintf(m.conn, "%s: %s\n", m.name, text)
+	line := fmt.Sprintf("%s %s", ">", text)
+	m.messages = append(m.messages, line)
+
+	line = fmt.Sprintf("%s: %s", m.name, text)
+	if m.conn != nil {
+		fmt.Fprintf(m.conn, "%s\n", line)
+	}
 	m.input = ""
 	return m, nil
 }
+
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
 
 func (m model) View() string {
 	if m.width == 0 {
 		return "Cargando..."
 	}
-	switch m.screen {
-	case screenMenu:
-		return m.viewMenu()
-	case screenLogin:
+	if m.screen == screenLogin {
 		return m.viewLogin()
-	default:
-		return m.viewChat()
 	}
-}
-
-func (m model) viewMenu() string {
-	title := styleHeader.Render("ACADEMY SCH CLIENT")
-	options := "\nSeleccioná un servicio:\n\n" +
-		"  [1] Chat General\n" +
-		"  [2] Streaming\n" +
-		"  [3] Foros\n\n" +
-		styleSystem.Render("Presioná un número para continuar")
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, title+options)
+	return m.viewChat()
 }
 
 func (m model) viewLogin() string {
-	title := styleHeader.Render("CONFIGURACIÓN DE PERFIL")
-	prompt := fmt.Sprintf("\nConectando a Destino: %x\nIngresá tu nombre:\n\n", m.destSelected)
-	input := styleInputArea.Width(30).Render(styleInputLabel.Render("> ") + m.input + "█")
+	// Definimos un ancho razonable para el diálogo, no toda la pantalla
+	loginWidth := 40
+	if m.width < loginWidth {
+		loginWidth = m.width - 4
+	}
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, title+prompt+input)
+	title := styleHeader.Render("SCH Forums")
+	prompt := "Ingresá tu nombre:"
+
+	// El input ahora tiene un ancho fijo dentro del diálogo centrado
+	inputField := styleInputArea.Width(loginWidth - 10).Render(
+		styleInputLabel.Render("> ") + m.input + "█",
+	)
+
+	hint := styleSystem.Render("Enter para conectar • Esc para salir")
+
+	// Unimos todo verticalmente para que se mueva como un solo bloque
+	uiBlock := lipgloss.JoinVertical(
+		lipgloss.Center,
+		title,
+		prompt,
+		"", // Espacio en blanco
+		inputField,
+		"", // Espacio en blanco
+		hint,
+	)
+
+	// Colocamos el bloque en el centro exacto de la terminal
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		styleLoginBox.Render(uiBlock),
+	)
 }
 
 func (m model) viewChat() string {
-	// 1. Cálculos de espacio
-	headerHeight := 2
 	inputHeight := 3
-	footerHeight := 1
-	// Espacio para los mensajes (restando bordes y cabeceras)
-	msgHeight := m.height - headerHeight - inputHeight - footerHeight - 2
+	headerHeight := 1
+	msgHeight := m.height - inputHeight - headerHeight - 4
 	if msgHeight < 1 {
 		msgHeight = 1
 	}
 
 	innerWidth := m.width - 4
 
-	// 2. Header
-	header := styleHeader.Render(fmt.Sprintf("SCH Chat — %s", styleName.Render(m.name)))
+	header := styleHeader.MarginBottom(0).Render(fmt.Sprintf("SCH Forum  —  %s", styleName.Render(m.name)))
 
-	// 3. Historial de Mensajes
 	visibleMsgs := m.messages
 	if len(visibleMsgs) > msgHeight {
 		visibleMsgs = visibleMsgs[len(visibleMsgs)-msgHeight:]
 	}
 	msgContent := strings.Join(visibleMsgs, "\n")
 
-	// Relleno para mantener la altura de la caja constante
 	lineCount := strings.Count(msgContent, "\n") + 1
 	if msgContent == "" {
 		lineCount = 0
@@ -229,22 +240,17 @@ func (m model) viewChat() string {
 	for i := lineCount; i < msgHeight; i++ {
 		msgContent += "\n"
 	}
-
 	msgBox := styleMsgArea.Width(innerWidth).Height(msgHeight).Render(msgContent)
 
-	// 4. Input Box
-	inputContent := styleInputLabel.Render(m.name+" > ") + m.input + "█"
+	inputContent := styleInputLabel.Render("> ") + m.input + "█"
 	inputBox := styleInputArea.Width(innerWidth).Render(inputContent)
 
-	// 5. Footer / Ayuda
-	hint := styleSystem.Render("  [Esc] Salir | [Enter] Enviar mensaje")
+	hint := styleSystem.Render("  Esc para salir")
 	if m.disconnected {
-		hint = styleDisconnected.Render("  CONEXIÓN PERDIDA")
+		hint = styleDisconnected.Render("  desconectado")
 	}
 
-	// 6. Ensamblado
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
+	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		msgBox,
 		inputBox,
