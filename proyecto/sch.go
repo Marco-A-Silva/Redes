@@ -1,4 +1,4 @@
-package proyecto // wat
+package main // wat
 
 import (
 	"log"

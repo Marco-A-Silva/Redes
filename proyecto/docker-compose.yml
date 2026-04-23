@@ -1,0 +1,23 @@
+services:
+  forum-service:
+    container_name: forum_container
+    build:
+      context: .
+      dockerfile: Dockerfile.forum
+    networks:
+      - proyecto-net
+
+  proxy-app:
+    container_name: proxy_container
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    ports:
+      - "8080:8080" 
+    networks:
+      - proyecto-net
+    depends_on:
+      - forum-service
+
+networks:
+  proyecto-net: {}

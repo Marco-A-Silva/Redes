@@ -3,32 +3,14 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"net"
 	"sync"
-
-	"proyecto"
 )
-
-func errorHandler(args ...any) {
-	for _, args := range args {
-		switch v:= args.(type) {
-		case error:
-			if v != nil {
-				log.Printf("Error: %v", v)
-			}
-		case bool:
-			if !v {
-				log.Print("NOT OK")
-			}
-		default:
-		}
-	}
-}
 
 type Hub struct {
 	mu      sync.Mutex
 	clients map[net.Conn]string
+	users 	map[string]net.Conn
 }
 
 func (h *Hub) post(msg string, sender net.Conn) {
@@ -37,7 +19,7 @@ func (h *Hub) post(msg string, sender net.Conn) {
 
 	for conn := range h.clients {
 		if conn != sender {
-			errorHandler(fmt.Fprintln(conn, msg))
+			ErrorHandler(fmt.Fprintln(conn, msg))
 		}
 	}
 }
@@ -52,14 +34,19 @@ func (h *Hub) logOff(conn net.Conn) {
 	h.mu.Lock()
 	delete(h.clients, conn)
 	h.mu.Unlock()
-	errorHandler(conn.Close())
+	ErrorHandler(conn.Close())
 }
 
 func handleForum(conn net.Conn, hub *Hub) {
 	defer hub.logOff(conn)
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Scan()
+	nombre := scanner.Text()
+	hub.clients[conn] = nombre
+	hub.users[nombre] = conn
 	for scanner.Scan() {
+
 		text := scanner.Text()
 		hub.post(text, conn)
 	}
@@ -72,9 +59,10 @@ func handleForum(conn net.Conn, hub *Hub) {
 func main() {
 	hub := &Hub{
 		clients: make(map[net.Conn]string),
+		users: make(map[string]net.Conn),
 	}
 
-	listener, err := net.Listen("tcp", proyecto.DestMap[proyecto.DestForum])
+	listener, err := net.Listen("tcp", DestMap[DestForum])
 	if err != nil {
 		return
 	}
