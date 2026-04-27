@@ -10,7 +10,7 @@ import (
 
 const (
 	TargetAddr   = "localhost:8080" 
-	Concurrencia = 10
+	Concurrencia = 500
 	WaitTime     = 5  
 )
 
@@ -50,10 +50,9 @@ func main() {
 			duracion := time.Since(startConn)
 
 			if err == nil {
-				if true {
+				if i % 50 == 0 {
 					fmt.Printf("[Conexión %d] Latencia de handshake: %v\n", id, duracion)
 				}
-				// Mantenemos abierto para el benchmark de File Descriptors
 				time.Sleep(time.Duration(WaitTime) * time.Second)
 			}
 		}(i)

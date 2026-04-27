@@ -207,6 +207,51 @@ func dealer() {
 	}
 }
 
+
+func supervisor() {
+    for {
+
+        dealer()
+
+		reconnected := false
+		plog("PROXY", "Foro desconectado. Limpiando clientes...", false)
+
+        clients.muCli.RLock()
+        var ids []uint32
+        for id := range clients.clients {
+            ids = append(ids, id)
+        }
+        clients.muCli.RUnlock()
+
+        for _, id := range ids {
+            kill(id)
+        }
+
+        for i := 1; i <= 30; i++ {
+			plog("PROXY", fmt.Sprintf("Reintentando conexión al foro... intento %d", i), false)
+            
+            conn, err := net.DialTimeout("tcp", DestMap[DestForum], 5*time.Second)
+            if err == nil {
+        
+                connDest.muDest.Lock()
+                connDest.conn = conn
+                connDest.muDest.Unlock()
+                
+				reconnected = true
+                plog("PROXY", "Reconectado al foro. Relanzando dealer.", false)
+                break
+            }
+
+            wait := time.Duration(i) * time.Second
+            plog("PROXY", fmt.Sprintf("Foro no disponible. Esperando %v...", wait), false)
+            time.Sleep(wait)
+        }
+
+		if !reconnected { log.Fatal("No se pudo reconectar al foro después de 30 intentos. Cerrando proxy.") }
+    }
+}
+
+
 func main() {
 	var err error
 	connDest.conn, err = net.DialTimeout("tcp", DestMap[DestForum], 5*time.Second)
@@ -215,7 +260,7 @@ func main() {
 	}
 	defer connDest.conn.Close()
 
-	go dealer()
+	go supervisor()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

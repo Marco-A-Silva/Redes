@@ -77,7 +77,7 @@ func handleForum(conn net.Conn, hub *Hub) {
 		
 		if (flags & FIN) != 0 {
 			hub.logOff(channelId)
-			return 
+			continue 
 		}
 
 		plSize := binary.BigEndian.Uint32(header[LengthPos : LengthPos+4])
