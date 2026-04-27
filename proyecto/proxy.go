@@ -1,14 +1,42 @@
 package main
 
 import (
-	"crypto/des"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
+)
+
+type Clients struct {
+	clients map[uint32]net.Conn
+	muCli   sync.RWMutex
+}
+
+type Destiny struct {
+	conn   net.Conn
+	muDest sync.Mutex
+}
+
+type Id struct {
+	nextId uint32
+	muId   sync.Mutex
+}
+
+var (
+	clients  = &Clients{clients: make(map[uint32]net.Conn)}
+	connDest = &Destiny{}
+	pool     = sync.Pool{
+		New: func() any {
+			return make([]byte, 4096)
+		},
+	}
+	nextId = &Id{nextId: 1}
 )
 
 func plog(prefix string, msg string, stealth bool) {
@@ -17,120 +45,207 @@ func plog(prefix string, msg string, stealth bool) {
 	}
 }
 
+func kill(myID uint32) {
+	finHeader := make([]byte, HeaderSize)
+	finHeader[VersionPos] = V1
+	finHeader[FlagsPos] = FIN
+	finHeader[DestPos] = DestForum
+	binary.BigEndian.PutUint32(finHeader[ChannelIdPos:ChannelIdPos+4], myID)
+
+	connDest.muDest.Lock()
+	if connDest.conn != nil {
+		connDest.conn.Write(finHeader)
+	}
+	connDest.muDest.Unlock()
+
+	clients.muCli.Lock()
+	if c, ok := clients.clients[myID]; ok {
+		c.Close()
+		delete(clients.clients, myID)
+		plog("PROXY", fmt.Sprintf("Cliente %d desconectado y limpiado.", myID), false)
+	}
+	clients.muCli.Unlock()
+}
+
 func handleConn(conn net.Conn) {
-	clientAdrr := conn.RemoteAddr().String()
-
-	// Setup de la conexion (Manejo conexion original y abrir el header)
-	defer ErrorHandler(conn.Close())
-
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
 	header := make([]byte, HeaderSize)
-	_, err := io.ReadFull(conn, header)
-	ErrorHandler(err)	
-
-	conn.SetReadDeadline(time.Time{})
-
-	// Flags byte 2
-	isStealth := (header[FlagsPos] & Stealth) != 0
-	hasKeepAlive := (header[FlagsPos] & KeepAlive) != 0
-	destKey := header[DestPos]
-	version := header[VersionPos]
-	plSize := binary.BigEndian.Uint32(header[LengthPos:LengthPos+4])
-
-	// Verificación de parametros del header
-
-	// Versión byte 1
-	switch header[VersionPos] {
-	case V1:
-		plog(clientAdrr, fmt.Sprintf("Versión %x aceptada", version), isStealth)
-	default:
-		plog(clientAdrr, fmt.Sprintf("Error: Versión %x no soportada", version), isStealth)
-		_, err := conn.Write([]byte{ErrInvalidVersion})
-		ErrorHandler(err)
-
+	if _, err := io.ReadFull(conn, header); err != nil {
+		conn.Close()
 		return
 	}
 
-	// Destino byte 3
-	dest, ok := DestMap[destKey]
-	if !ok {
-		plog(clientAdrr, fmt.Sprintf("Error: Destino %x no encontrado", destKey), isStealth)
-		return
+	// Extraer flags iniciales para el handshake
+	initialFlags := header[FlagsPos]
+	isStealth := (initialFlags & Stealth) != 0
+
+	plSize := binary.BigEndian.Uint32(header[LengthPos : LengthPos+4])
+	payload := make([]byte, plSize)
+	if plSize > 0 {
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			conn.Close()
+			return
+		}
 	}
 
-	plog(clientAdrr, fmt.Sprintf("Conectando a %s", dest), isStealth)
+	connDest.muDest.Lock()
+	if connDest.conn == nil {
+		connDest.muDest.Unlock()
+		conn.Write([]byte{ErrServiceDown})
+		conn.Close()
+		return
+	}
+	connDest.muDest.Unlock()
 
-	fPl := make([]byte, plSize)
-	ErrorHandler(io.ReadFull(conn, fPl))
+	nextId.muId.Lock()
+	myID := nextId.nextId
+	nextId.nextId++
+	nextId.muId.Unlock()
 
-	destConn, err := net.DialTimeout("tcp", dest, 5*time.Second)
-	if err != nil {
-		_, err := conn.Write([]byte{ErrServiceDown})
-		if err != nil {
+	clients.muCli.Lock()
+	clients.clients[myID] = conn
+	clients.muCli.Unlock()
+
+	plog("PROXY", fmt.Sprintf("Handshake exitoso. ID %d asignado a '%s'", myID, string(payload)), isStealth)
+
+	defer kill(myID)
+
+	connDest.muDest.Lock()
+	binary.BigEndian.PutUint32(header[ChannelIdPos:ChannelIdPos+4], myID)
+	packet := append(header, payload...)
+	connDest.conn.Write(packet)
+	connDest.muDest.Unlock()
+	
+	conn.Write([]byte{ErrNone})
+	
+	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+
+	for {
+		if _, err := io.ReadFull(conn, header); err != nil {
+			break
+		}
+
+		flags := header[FlagsPos]
+		isFin := (flags & FIN) != 0
+		isKeepAlive := (flags & KeepAlive) != 0
+		isStealth = (flags & Stealth) != 0
+		plSize := binary.BigEndian.Uint32(header[LengthPos : LengthPos+4])
+
+		if isKeepAlive {
+			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+			plog("PROXY", fmt.Sprintf("KeepAlive recibido del ID %d. Timeout renovado.", myID), isStealth)
+			
+			if plSize == 0 && !isFin {
+				continue
+			}
+		} else {
+			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		}
+
+		pBuffer := pool.Get().([]byte)
+		original := pBuffer
+		if uint32(len(pBuffer)) < plSize {
+			pBuffer = make([]byte, plSize)
+		}
+
+		if plSize > 0 {
+			if _, err := io.ReadFull(conn, pBuffer[:plSize]); err != nil {
+				pool.Put(original)
+				break
+			}
+			plog("PROXY", fmt.Sprintf("Mensaje reenviado del ID %d (%d bytes)", myID, plSize), isStealth)
+		}
+
+		binary.BigEndian.PutUint32(header[ChannelIdPos:ChannelIdPos+4], myID)
+
+		connDest.muDest.Lock()
+		pckt:= append(header, pBuffer[:plSize]...)
+		connDest.conn.Write(pckt)
+		connDest.muDest.Unlock()
+
+		pool.Put(original)
+
+		if isFin {
+			plog("PROXY", fmt.Sprintf("Flag FIN recibida del ID %d. Iniciando cierre.", myID), isStealth)
+			break
+		}
+	}
+}
+
+func dealer() {
+	headerBuff := make([]byte, HeaderSize)
+	for {
+		if _, err := io.ReadFull(connDest.conn, headerBuff); err != nil {
+			plog("PROXY", fmt.Sprintf("Conexión con el destino perdida: %v", err), false)
 			return
 		}
 
-		return
-	}
+		channelId := binary.BigEndian.Uint32(headerBuff[ChannelIdPos : ChannelIdPos+4])
+		plSize := binary.BigEndian.Uint32(headerBuff[LengthPos : LengthPos+4])
 
-	defer ErrorHandler(destConn.Close())
-
-	destConn.Write(header)
-	destConn.Write(fPl)
-
-	if hasKeepAlive {
-
-		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			tcpConn.SetKeepAlive(true)
+		pBuffer := pool.Get().([]byte)
+		original := pBuffer
+		if uint32(len(pBuffer)) < plSize {
+			pBuffer = make([]byte, plSize)
 		}
 
-		if tcpDest, ok := destConn.(*net.TCPConn); ok {
-			tcpDest.SetKeepAlive(true)
+		if plSize > 0 {
+			if _, err := io.ReadFull(connDest.conn, pBuffer[:plSize]); err != nil {
+				pool.Put(original)
+				return
+			}
 		}
 
-	}
+		clients.muCli.RLock()
+		clientConn, ok := clients.clients[channelId]
+		clients.muCli.RUnlock()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go forward(conn, destConn, &wg, isStealth, clientAdrr)
-	go forward(destConn, conn, &wg, isStealth, "BACKWARD")
-
-	wg.Wait()
-}
-
-func forward(src, dest net.Conn, wg *sync.WaitGroup, stealth bool, prefix string) {
-	defer wg.Done()
-
-	headerBuff := make([]byte, HeaderSize)
-
-	for {
-		ErrorHandler(io.ReadFull(src, headerBuff))
-	
-		size := binary.BigEndian.Uint32(headerBuff[LengthPos:LengthPos+4])
-
-		payloadBuff := make([]byte, size)
-		ErrorHandler(io.ReadFull(src,  payloadBuff))
-
-		dest.Write(headerBuff)
-		dest.Write(payloadBuff)
-
-		plog(prefix, fmt.Sprintf("Paquete reenvaiado (%d bytes)", size), stealth)
-
+		if ok {
+			packet := append(headerBuff, pBuffer[:plSize]...)
+			clientConn.Write(packet)
+		}	
+		pool.Put(original)
 	}
 }
 
 func main() {
+	var err error
+	connDest.conn, err = net.DialTimeout("tcp", DestMap[DestForum], 5*time.Second)
+	if err != nil {
+		log.Fatalf("No se pudo conectar al foro: %v", err)
+	}
+	defer connDest.conn.Close()
+
+	go dealer()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		plog("PROXY", "Apagando proxy. Avisando a clientes y servicios.", false)
+		
+		clients.muCli.RLock()
+		var ids []uint32
+		for id := range clients.clients {
+			ids = append(ids, id)
+		}
+		clients.muCli.RUnlock()
+
+		for _, id := range ids {
+			kill(id)
+		}
+		os.Exit(0)
+	}()
+
 	listener, err := net.Listen("tcp", ProxyPort)
 	if err != nil {
-		return
+		log.Fatalf("Error al abrir listener: %v", err)
 	}
+	plog("PROXY", fmt.Sprintf("Escuchando en %s", ProxyPort), false)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			return
+			continue
 		}
 		go handleConn(conn)
 	}

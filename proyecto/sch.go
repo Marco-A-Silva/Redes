@@ -15,10 +15,9 @@ const (
 
 // Flags
 const (
-	KeepAlive byte = 0x01
-	Prio      byte = 0x02
-	Stealth   byte = 0x04
-	Checksum  byte = 0x08
+	FIN byte = 0x01
+	Stealth byte = 0x04
+	KeepAlive byte = 0x10
 )
 
 // Destinos
@@ -62,6 +61,7 @@ func ErrorHandler(args ...any) {
 				log.Print("NOT OK")
 			}
 		default:
+		log.Print("Error Handled")
 		}
 	}
 }
