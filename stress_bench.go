@@ -1,4 +1,4 @@
-package main
+package proyecto
 
 import (
 	"encoding/binary"

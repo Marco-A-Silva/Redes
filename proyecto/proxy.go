@@ -74,7 +74,6 @@ func handleConn(conn net.Conn) {
 		return
 	}
 
-	// Extraer flags iniciales para el handshake
 	initialFlags := header[FlagsPos]
 	isStealth := (initialFlags & Stealth) != 0
 
