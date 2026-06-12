@@ -28,3 +28,9 @@ La arquitectura está diseñada para separar la interfaz de usuario de la lógic
    Asegúrate de tener Docker instalado y ejecuta el entorno simulado:
 ```bash
    docker-compose up --build
+```
+2. **Ejecutar el cliente:**
+   Compila y corre el cliente para iniciar la conexión:
+```bash
+   go run client/main.go
+```
